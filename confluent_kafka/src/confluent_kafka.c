@@ -1012,8 +1012,8 @@ static rd_kafka_headers_t *py_headers_dict_to_c (PyObject *hdrs) {
                 k = cfl_PyUnistr_AsUTF8(ks, &ks8);
 
                 if (vo != Py_None) {
-                        if (PyString_AsStringAndSize(vo, (char **)&v,
-                                                     &vsize) == -1) {
+                        if (cfl_PyBin(_AsStringAndSize(vo, (char **)&v,
+                                                       &vsize)) == -1) {
                                 Py_DECREF(ks);
                                 rd_kafka_headers_destroy(rd_headers);
                                 return NULL;
@@ -1215,8 +1215,13 @@ void Handle_clear (Handle *h) {
 
         Py_XDECREF(h->logger);
 
-        if (h->initiated)
+        if (h->initiated) {
+#ifdef PY3
+                PyThread_tss_delete(&h->tlskey);
+#else
                 PyThread_delete_key(h->tlskey);
+#endif
+        }
 }
 
 /**
@@ -1678,7 +1683,17 @@ rd_kafka_conf_t *common_conf_setup (rd_kafka_type_t ktype,
 
 	rd_kafka_conf_set_opaque(conf, h);
 
-	h->tlskey = PyThread_create_key();
+#ifdef PY3
+        if (PyThread_tss_create(&h->tlskey)) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "Failed to initialize thread local storage");
+                rd_kafka_conf_destroy(conf);
+                return NULL;
+        }
+#else
+        h->tlskey = PyThread_create_key();
+#endif
+
         h->initiated = 1;
 
 	return conf;
@@ -1695,7 +1710,11 @@ void CallState_begin (Handle *h, CallState *cs) {
 	cs->thread_state = PyEval_SaveThread();
 	assert(cs->thread_state != NULL);
 	cs->crashed = 0;
-	PyThread_set_key_value(h->tlskey, cs);
+#ifdef PY3
+        PyThread_tss_set(&h->tlskey, cs);
+#else
+        PyThread_set_key_value(h->tlskey, cs);
+#endif
 }
 
 /**
@@ -1703,7 +1722,11 @@ void CallState_begin (Handle *h, CallState *cs) {
  * @returns 0 if a Python signal was raised or a callback crashed, else 1.
  */
 int CallState_end (Handle *h, CallState *cs) {
-	PyThread_delete_key_value(h->tlskey);
+#ifdef PY3
+        PyThread_tss_set(&h->tlskey, NULL);
+#else
+        PyThread_delete_key_value(h->tlskey);
+#endif
 
 	PyEval_RestoreThread(cs->thread_state);
 
@@ -1718,7 +1741,12 @@ int CallState_end (Handle *h, CallState *cs) {
  * @brief Get the current thread's CallState and re-locks the GIL.
  */
 CallState *CallState_get (Handle *h) {
-	CallState *cs = PyThread_get_key_value(h->tlskey);
+        CallState *cs;
+#ifdef PY3
+        cs = PyThread_tss_get(&h->tlskey);
+#else
+        cs = PyThread_get_key_value(h->tlskey);
+#endif
 	assert(cs != NULL);
 	assert(cs->thread_state != NULL);
 	PyEval_RestoreThread(cs->thread_state);
